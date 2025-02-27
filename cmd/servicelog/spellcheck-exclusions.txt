@@ -1,0 +1,11 @@
+# Spellcheck exclusion list
+imageregistry
+accessDenied
+InvalidAccessKeyId
+AWS
+IAM
+SLA
+image-registry
+SRE
+ADDON
+pods

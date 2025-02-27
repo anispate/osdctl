@@ -1,6 +1,7 @@
 package servicelog
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,12 +11,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
-	"k8s.io/utils/strings/slices"
-
+	"github.com/fatih/color"
 	"github.com/openshift-online/ocm-cli/pkg/arguments"
 	"github.com/openshift-online/ocm-cli/pkg/dump"
 	sdk "github.com/openshift-online/ocm-sdk-go"
@@ -24,26 +26,27 @@ import (
 	"github.com/openshift/osdctl/internal/utils"
 	"github.com/openshift/osdctl/pkg/printer"
 	ocmutils "github.com/openshift/osdctl/pkg/utils"
-
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
 
 type PostCmdOptions struct {
-	Message         servicelog.Message
-	ClustersFile    servicelog.ClustersFile
-	Template        string
-	TemplateParams  []string
-	Overrides       []string
-	filterFiles     []string // Path to filter file
-	filtersFromFile string   // Contents of filterFiles
-	filterParams    []string
-	isDryRun        bool
-	skipPrompts     bool
-	clustersFile    string
-	InternalOnly    bool
-	ClusterId       string
+	Message                  servicelog.Message
+	ClustersFile             servicelog.ClustersFile
+	Template                 string
+	TemplateParams           []string
+	Overrides                []string
+	filterFiles              []string // Path to filter file
+	filtersFromFile          string   // Contents of filterFiles
+	filterParams             []string
+	isDryRun                 bool
+	skipPrompts              bool
+	clustersFile             string
+	InternalOnly             bool
+	ClusterId                string
+	SpellcheckExclusionsFile string
+	spellcheckExclusions     []string
 
 	// Messaged clusters
 	successfulClusters map[string]string
@@ -82,7 +85,7 @@ func newPostCmd() *cobra.Command {
 			if len(args) > 0 {
 				opts.ClusterId = args[0]
 			}
-			return opts.Run()
+			return opts.Run() // Move spell check into Run
 		},
 	}
 
@@ -96,6 +99,8 @@ func newPostCmd() *cobra.Command {
 	postCmd.Flags().StringArrayVarP(&opts.filterFiles, "query-file", "f", []string{}, "File containing search queries to apply. All lines in the file will be concatenated into a single query. If this flag is called multiple times, every file's search query will be combined with logical AND.")
 	postCmd.Flags().StringVarP(&opts.clustersFile, "clusters-file", "c", "", `Read a list of clusters to post the servicelog to. the format of the file is: {"clusters":["$CLUSTERID"]}`)
 	postCmd.Flags().BoolVarP(&opts.InternalOnly, "internal", "i", false, "Internal only service log. Use MESSAGE for template parameter (eg. -p MESSAGE='My super secret message').")
+	postCmd.Flags().StringVar(&opts.Message.Summary, "summary", "", "Summary of the service log")
+	postCmd.Flags().StringVar(&opts.Message.Description, "description", "", "Description of the service log")
 
 	return postCmd
 }
@@ -139,22 +144,30 @@ func (o *PostCmdOptions) Run() error {
 	if err := o.Validate(); err != nil {
 		return err
 	}
+	if err := o.readSpellcheckExclusions(); err != nil {
+		return err
+	}
 
-	o.parseUserParameters()                // parse all the '-p' user flags
-	overrideMap, err := o.parseOverrides() // parse all the '-o' flags
+	o.parseUserParameters()
+	overrideMap, err := o.parseOverrides()
 	if err != nil {
 		log.Fatalf("Error parsing overrides: %s", err)
 	}
 
-	o.readFilterFile() // parse the ocm filters in file provided via '-f' flag
-	o.readTemplate()   // parse the given JSON template provided via '-t' flag
+	o.readFilterFile()
+	o.readTemplate()
 
-	// For every '-p' flag, replace its related placeholder in the template & filterFiles
+	// Check spelling after template is loaded
+	fmt.Println("Message after readTemplate:", o.Message) // Debug
+	if err := o.checkSpelling(); err != nil {
+		log.Fatal(err)
+		return err
+	}
+
 	for k := range userParameterNames {
 		o.replaceFlags(userParameterNames[k], userParameterValues[k])
 	}
 
-	// Replace any overrides
 	for overrideKey, overrideValue := range overrideMap {
 		err := o.overrideField(overrideKey, overrideValue)
 		if err != nil {
@@ -162,12 +175,10 @@ func (o *PostCmdOptions) Run() error {
 		}
 	}
 
-	// Check if there are any remaining placeholders in the template that are not replaced by a parameter,
-	// excluding '${CLUSTER_UUID}' which will be replaced for each cluster later
 	o.checkLeftovers([]string{"${CLUSTER_UUID}"})
 
-	// Create an OCM client to talk to the cluster API
-	// the user has to be logged in (e.g. 'ocm login')
+	// Removed duplicate checkSpelling call
+
 	ocmClient, err := ocmutils.CreateConnection()
 	if err != nil {
 		return err
@@ -665,4 +676,377 @@ func (o *PostCmdOptions) cleanUp(clusters []*v1.Cluster) {
 	}
 
 	o.printPostOutput()
+}
+
+// Dictionary loaded dynamically
+var dictionary map[string]bool
+
+func loadDictionary() error {
+	if dictionary != nil {
+		return nil
+	}
+	dictionary = make(map[string]bool)
+	dictPath := "/usr/share/dict/words" // Common on macOS
+	data, err := os.ReadFile(dictPath)
+	if err != nil {
+		return fmt.Errorf("failed to load dictionary from %s: %w", dictPath, err)
+	}
+	for _, word := range strings.Split(string(data), "\n") {
+		word = strings.TrimSpace(word)
+		if word != "" {
+			dictionary[strings.ToLower(word)] = true
+		}
+	}
+	fmt.Printf("Loaded %d words from dictionary\n", len(dictionary))
+	return nil
+}
+
+func (o *PostCmdOptions) checkSpelling() error {
+	// Load dictionary
+	if err := loadDictionary(); err != nil {
+		log.Warnf("Proceeding without dictionary: %v", err)
+		dictionary = make(map[string]bool) // Fallback to empty dictionary
+	}
+
+	red := color.New(color.FgHiRed)
+	boldRed := red.Add(color.Underline)
+
+	fieldsToCheck := []string{
+		o.Message.Summary,
+		o.Message.Description,
+	}
+
+	var corrections []string
+	for _, fieldValue := range fieldsToCheck {
+		if fieldValue == "" {
+			continue
+		}
+
+		fmt.Println("Checking field:", fieldValue)
+		words := splitIntoWords(fieldValue)
+		p1 := regexp.MustCompile(`^[.,:'"]`)
+		p2 := regexp.MustCompile(`[.,:'"]$`)
+
+		for _, word := range words {
+			nw := p1.ReplaceAll([]byte(word), []byte(""))
+			nw = p2.ReplaceAll(nw, []byte(""))
+			cleanWord := string(nw)
+
+			fmt.Printf("Word: %q ", cleanWord)
+
+			if strings.HasPrefix(cleanWord, "http") {
+				fmt.Printf("(skipped URL) %s ", cleanWord)
+				continue
+			}
+
+			isExcluded := slices.ContainsFunc(o.spellcheckExclusions, func(excluded string) bool {
+				return strings.EqualFold(excluded, cleanWord)
+			})
+			if isExcluded {
+				fmt.Printf("(excluded) %s ", cleanWord)
+				continue
+			}
+
+			// Check if word is in dictionary
+			lowerWord := strings.ToLower(cleanWord)
+			isCorrect := dictionary[lowerWord]
+			suggestion := ""
+			if !isCorrect {
+				// Use heuristics and Levenshtein distance if not in dictionary
+				if isLikelyTypo(cleanWord) || !isCorrect {
+					suggestion = suggestCorrection(lowerWord)
+					fmt.Printf("(typo detected, suggestion: %q) ", suggestion)
+					if suggestion != "" && suggestion != cleanWord && suggestion != lowerWord {
+						corrections = append(corrections, fmt.Sprintf("Original: %s (Suggested: %s)", cleanWord, suggestion))
+						boldRed.Printf("%s ", cleanWord)
+					} else {
+						fmt.Printf("%s ", cleanWord)
+					}
+				} else {
+					fmt.Printf("(not in dict) %s ", cleanWord)
+				}
+			} else {
+				fmt.Printf("%s ", cleanWord)
+			}
+		}
+		fmt.Println()
+	}
+
+	if len(corrections) > 0 {
+		summary := fmt.Sprintf("Spelling errors detected in %d words:\n%s", len(corrections), strings.Join(corrections, "\n"))
+		return fmt.Errorf(summary)
+	}
+	fmt.Println("No spelling errors detected.")
+	return nil
+}
+
+// isLikelyTypo detects obvious typos
+func isLikelyTypo(word string) bool {
+	lowerWord := strings.ToLower(word)
+	length := len(lowerWord)
+
+	// Short words (< 3) are suspicious
+	if length < 3 {
+		return true
+	}
+
+	// Count vowels and consonants
+	vowels := 0
+	consonants := 0
+	for _, r := range lowerWord {
+		if strings.ContainsRune("aeiou", r) {
+			vowels++
+		} else if unicode.IsLetter(r) {
+			consonants++
+		}
+	}
+
+	// No vowels in longer words
+	if vowels == 0 && length > 3 {
+		return true
+	}
+
+	// High consonant-to-vowel ratio
+	if consonants > vowels*2 && length > 5 {
+		return true
+	}
+
+	// Repeated letters (3+)
+	for i := 0; i < len(word)-2; i++ {
+		if word[i] == word[i+1] && word[i+1] == word[i+2] {
+			return true
+		}
+	}
+
+	// Mixed numbers and letters
+	hasLetters := false
+	hasNumbers := false
+	for _, r := range word {
+		if unicode.IsLetter(r) {
+			hasLetters = true
+		}
+		if unicode.IsDigit(r) {
+			hasNumbers = true
+		}
+	}
+	if hasLetters && hasNumbers && length > 4 {
+		return true
+	}
+
+	// Consecutive consonant runs
+	consonantRun := 0
+	for _, r := range lowerWord {
+		if !strings.ContainsRune("aeiou", r) && unicode.IsLetter(r) {
+			consonantRun++
+			if consonantRun > 3 {
+				return true
+			}
+		} else {
+			consonantRun = 0
+		}
+	}
+
+	return false
+}
+
+// suggestCorrection uses Levenshtein distance and heuristics
+func suggestCorrection(word string) string {
+	cleaned := cleanWord(word)
+	if cleaned == "" {
+		return word
+	}
+
+	// Try common suffixes first
+	if strings.HasSuffix(cleaned, "tion") && len(cleaned) > 6 {
+		if dictionary[cleaned] {
+			return cleaned
+		}
+		for dictWord := range dictionary {
+			if strings.HasSuffix(dictWord, "tion") && levenshteinDistance(cleaned, dictWord) <= 3 {
+				return dictWord
+			}
+		}
+	}
+	if strings.HasSuffix(cleaned, "ed") && len(cleaned) > 5 {
+		if dictionary[cleaned] {
+			return cleaned
+		}
+		for dictWord := range dictionary {
+			if strings.HasSuffix(dictWord, "ed") && levenshteinDistance(cleaned, dictWord) <= 3 {
+				return dictWord
+			}
+		}
+	}
+
+	// General Levenshtein search
+	bestMatch := ""
+	minDistance := 3 // Threshold for suggestion
+	for dictWord := range dictionary {
+		dist := levenshteinDistance(cleaned, dictWord)
+		if dist < minDistance {
+			minDistance = dist
+			bestMatch = dictWord
+		}
+	}
+	if bestMatch != "" {
+		return bestMatch
+	}
+	return cleaned
+}
+
+// cleanWord removes numbers and collapses repeated letters
+func cleanWord(word string) string {
+	var cleanBuilder strings.Builder
+	for _, r := range strings.ToLower(word) {
+		if unicode.IsLetter(r) {
+			cleanBuilder.WriteRune(r)
+		}
+	}
+	cleaned := cleanBuilder.String()
+	if cleaned == "" {
+		return ""
+	}
+
+	var noRepeats strings.Builder
+	lastChar := rune(0)
+	repeatCount := 0
+	for _, r := range cleaned {
+		if r == lastChar {
+			repeatCount++
+			if repeatCount < 2 {
+				noRepeats.WriteRune(r)
+			}
+		} else {
+			noRepeats.WriteRune(r)
+			lastChar = r
+			repeatCount = 0
+		}
+	}
+	return noRepeats.String()
+}
+
+// levenshteinDistance calculates edit distance
+func levenshteinDistance(s1, s2 string) int {
+	if s1 == s2 {
+		return 0
+	}
+	if len(s1) == 0 {
+		return len(s2)
+	}
+	if len(s2) == 0 {
+		return len(s1)
+	}
+
+	dp := make([][]int, len(s1)+1)
+	for i := range dp {
+		dp[i] = make([]int, len(s2)+1)
+		dp[i][0] = i
+	}
+	for j := range dp[0] {
+		dp[0][j] = j
+	}
+
+	for i := 1; i <= len(s1); i++ {
+		for j := 1; j <= len(s2); j++ {
+			cost := 0
+			if s1[i-1] != s2[j-1] {
+				cost = 1
+			}
+			dp[i][j] = min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost)
+		}
+	}
+	return dp[len(s1)][len(s2)]
+}
+
+func min(a, b, c int) int {
+	if a <= b && a <= c {
+		return a
+	}
+	if b <= c {
+		return b
+	}
+	return c
+}
+
+// splitIntoWords splits the input string into words while preserving expected punctuation
+func splitIntoWords(input string) []string {
+	var words []string
+	var currentWord strings.Builder
+	for _, r := range input {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || isExpectedPunctuation(r) || r == '-' {
+			currentWord.WriteRune(r)
+		} else if unicode.IsSpace(r) {
+			if currentWord.Len() > 0 {
+				words = append(words, currentWord.String())
+				currentWord.Reset()
+			}
+		}
+	}
+	if currentWord.Len() > 0 {
+		words = append(words, currentWord.String())
+	}
+	return words
+}
+
+// isExpectedPunctuation checks if the rune is an expected punctuation mark
+func isExpectedPunctuation(r rune) bool {
+	expectedPunctuation := []rune{',', '.', '\'', ':', ';', '!', '?'}
+	for _, p := range expectedPunctuation {
+		if r == p {
+			return true
+		}
+	}
+	return false
+}
+
+func (o *PostCmdOptions) checkSpellingWithTimeout(timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout) // Create a context with a timeout
+	defer cancel()
+
+	resultChan := make(chan error, 1) // Channel to receive the result of the spell-checking
+
+	go func() {
+		resultChan <- o.checkSpelling() //Run the spell-checking in a goroutine
+	}()
+
+	// Wait for the result or timeout
+	select {
+	case err := <-resultChan:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("spell-checking timed out after %v", timeout)
+	}
+}
+
+func (o *PostCmdOptions) readSpellcheckExclusions() error {
+	defaultExclusionsFile := "/Users/anishpatel/github_repos/osdctl/cmd/servicelog/spellcheck-exclusions.txt" // Set your default path
+	filePath := o.SpellcheckExclusionsFile
+	if filePath == "" {
+		filePath = defaultExclusionsFile
+		fmt.Println("Using default spellcheck exclusions file:", filePath)
+	} else {
+		fmt.Println("Using specified spellcheck exclusions file:", filePath)
+	}
+
+	contents, err := o.accessFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read spellcheck exclusions file: %w", err)
+	}
+	lines := strings.Split(string(contents), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			o.spellcheckExclusions = append(o.spellcheckExclusions, line)
+		}
+	}
+	fmt.Println("Loaded spellcheck exclusions:", o.spellcheckExclusions)
+	return nil
+}
+
+func ConfirmPrompt(prompt string) bool {
+	fmt.Print(prompt)
+	var response string
+	fmt.Scanln(&response)
+	response = strings.ToLower(strings.TrimSpace(response))
+	return response == "y" || response == "yes"
 }

@@ -151,3 +151,77 @@ func Test_buildInternalServiceLog(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckSpelling(t *testing.T) {
+	tests := []struct {
+		name        string
+		problem     string
+		resolution  string
+		evidence    string
+		expectError bool
+		want        string
+	}{
+		{
+			name:        "No spelling errors",
+			problem:     "This is a correct message.",
+			resolution:  "No issues here.",
+			evidence:    "Everything is fine.",
+			expectError: false,
+			want:        "",
+		},
+		{
+			name:        "Spelling errors in Problem",
+			problem:     "This message has a typo: recieve",
+			resolution:  "No issues here.",
+			evidence:    "Everything is fine.",
+			expectError: true,
+			want:        "Spelling errors detected:\nOriginal: recieve, Correction: receive",
+		},
+		{
+			name:        "Spelling errors in Resolution",
+			problem:     "No issues here.",
+			resolution:  "Please fix the accomodation issue.",
+			evidence:    "Everything is fine.",
+			expectError: true,
+			want:        "Spelling errors detected:\nOriginal: accomodation, Correction: accommodation",
+		},
+		{
+			name:        "Spelling errors in Evidence",
+			problem:     "No issues here.",
+			resolution:  "No issues here.",
+			evidence:    "Refer to the seperate document.",
+			expectError: true,
+			want:        "Spelling errors detected:\nOriginal: seperate, Correction: separate",
+		},
+		{
+			name:        "Spelling errors in multiple fields",
+			problem:     "This message has a typo: recieve",
+			resolution:  "Please fix the accomodation issue.",
+			evidence:    "Refer to the seperate document.",
+			expectError: true,
+			want:        "Spelling errors detected:\nOriginal: recieve, Correction: receive\nOriginal: accomodation, Correction: accommodation\nOriginal: seperate, Correction: separate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &Post{
+				Problem:    tt.problem,
+				Resolution: tt.resolution,
+				Evidence:   tt.evidence,
+			}
+
+			err := p.checkSpelling()
+			if (err != nil) != tt.expectError {
+				t.Errorf("checkSpelling() = %v, expected error: %v", err, tt.expectError)
+			}
+
+			if tt.expectError {
+				got := err.Error()
+				if got != tt.want {
+					t.Errorf("checkSpelling() corrections = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}

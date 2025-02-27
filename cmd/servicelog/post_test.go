@@ -107,4 +107,46 @@ var _ = Describe("Test posting service logs", func() {
 			Expect(err).Should(HaveOccurred())
 		})
 	})
+
+	Context("spell-checking", func() {
+		It("detects no spelling errors", func() {
+			options.Message.Summary = "This is a correct message."
+			options.Message.Description = "No issues here."
+
+			err := options.checkSpelling()
+
+			Expect(err).ShouldNot(HaveOccurred())
+		})
+
+		It("detects spelling errors in summary", func() {
+			options.Message.Summary = "This message has a typo: recieve"
+			options.Message.Description = "No issues here."
+
+			err := options.checkSpelling()
+
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Original: recieve, Correction: receive"))
+		})
+
+		It("detects spelling errors in description", func() {
+			options.Message.Summary = "No issues here."
+			options.Message.Description = "Refer to the seperate document."
+
+			err := options.checkSpelling()
+
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Original: seperate, Correction: separate"))
+		})
+
+		It("detects spelling errors in both summary and description", func() {
+			options.Message.Summary = "This message has a typo: recieve"
+			options.Message.Description = "Refer to the seperate document."
+
+			err := options.checkSpelling()
+
+			Expect(err).Should(HaveOccurred())
+			Expect(err.Error()).To(ContainSubstring("Original: recieve, Correction: receive"))
+			Expect(err.Error()).To(ContainSubstring("Original: seperate, Correction: separate"))
+		})
+	})
 })

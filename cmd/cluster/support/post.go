@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/golangci/misspell"
 	"github.com/openshift-online/ocm-cli/pkg/dump"
 	sdk "github.com/openshift-online/ocm-sdk-go"
 	cmv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
@@ -143,6 +144,10 @@ func (p *Post) Run(clusterID string) error {
 	if err := p.check(); err != nil {
 		return err
 	}
+	// Check spelling in Problem, Resolution, and Evidence fields
+	if err := p.checkSpelling(); err != nil {
+		return err
+	}
 
 	// Check that the cluster key (name, identifier or external identifier) given by the user
 	// is reasonably safe so that there is no risk of SQL injection
@@ -246,6 +251,37 @@ See: https://source.redhat.com/groups/public/sre/wiki/defining_limited_support_p
 			return fmt.Errorf("failed to post internal service log: %w", err)
 		}
 		fmt.Printf("Successfully sent internal service log with ID %v\n", postServiceLogResponse.Body().ID())
+	}
+
+	return nil
+}
+
+func (p *Post) checkSpelling() error {
+	spellChecker := misspell.New()
+	spellChecker.AddRuleList(misspell.DictAmerican)
+	spellChecker.Compile()
+	fieldsToCheck := []string{
+		p.Problem,
+		p.Resolution,
+		p.Evidence,
+	}
+
+	var corrections []string
+	for _, fieldValue := range fieldsToCheck {
+		if fieldValue == "" {
+			continue
+		}
+
+		corrected, diffs := spellChecker.Replace(fieldValue)
+		if corrected != fieldValue {
+			for _, diff := range diffs {
+				corrections = append(corrections, fmt.Sprintf("Original: %s, Correction: %s", diff.Original, diff.Corrected))
+			}
+		}
+	}
+
+	if len(corrections) > 0 {
+		return fmt.Errorf("Spelling errors detected:\n%s", strings.Join(corrections, "\n"))
 	}
 
 	return nil

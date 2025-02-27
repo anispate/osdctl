@@ -26,9 +26,11 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.14
 	github.com/aws/smithy-go v1.22.2
 	github.com/brianvoe/gofakeit/v6 v6.24.0
+	github.com/client9/misspell v0.3.4
 	github.com/coreos/go-semver v0.3.1
 	github.com/deckarep/golang-set v1.8.0
 	github.com/fatih/color v1.18.0
+	github.com/golangci/misspell v0.6.0
 	github.com/google/go-github/v63 v63.0.0
 	github.com/google/uuid v1.6.0
 	github.com/olekukonko/tablewriter v0.0.5
@@ -67,7 +69,6 @@ require (
 	k8s.io/cli-runtime v0.32.1
 	k8s.io/client-go v0.32.1
 	k8s.io/kubectl v0.32.1
-	k8s.io/utils v0.0.0-20241210054802-24370beab758
 	open-cluster-management.io/api v0.15.0
 	sigs.k8s.io/controller-runtime v0.20.1
 	sigs.k8s.io/kustomize/kyaml v0.19.0
@@ -278,6 +279,7 @@ require (
 	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20241212222426-2c72e554b1e7 // indirect
 	k8s.io/pod-security-admission v0.32.1 // indirect
+	k8s.io/utils v0.0.0-20241210054802-24370beab758 // indirect
 	sigs.k8s.io/json v0.0.0-20241014173422-cfa47c3a1cc8 // indirect
 	sigs.k8s.io/kustomize/api v0.19.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v4 v4.5.0 // indirect
